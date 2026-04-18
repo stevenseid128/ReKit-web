@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ReKit — MIDI Drum Remapper</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="container">
+    <h1>ReKit</h1>
+    <p class="subtitle">MIDI Drum Remapper</p>
+
+    <!-- Library Pickers -->
+    <div class="pickers">
+      <div class="picker-group">
+        <label for="source-library">Source Library</label>
+        <select id="source-library"></select>
+      </div>
+      <div class="picker-group">
+        <label for="dest-library">Destination Library</label>
+        <select id="dest-library"></select>
+      </div>
+    </div>
+
+    <!-- File Controls -->
+    <div class="file-controls">
+      <div class="file-controls-left">
+        <label class="add-file-btn" tabindex="0">
+          Add MIDI Files...
+          <input type="file" id="file-input" accept=".mid,.midi" multiple hidden>
+        </label>
+        <button id="clear-all-btn" class="clear-btn" disabled>Clear All</button>
+      </div>
+      <button id="convert-btn" class="convert-btn" disabled>Convert</button>
+      <span id="file-count" class="file-count"></span>
+    </div>
+
+    <!-- Drop Zone / File List -->
+    <div id="drop-zone" class="drop-zone">
+      <div id="empty-state" class="empty-state">
+        <div class="empty-icon">&#127929;</div>
+        <p>Drop MIDI files here, or click Add MIDI Files...</p>
+      </div>
+      <div id="file-list" class="file-list hidden"></div>
+    </div>
+
+    <!-- Download Button -->
+    <div id="download-section" class="download-section hidden">
+      <button id="download-btn" class="download-btn">Download</button>
+    </div>
+
+    <!-- Messages -->
+    <div id="error-message" class="message error hidden"></div>
+    <div id="info-message" class="message info hidden"></div>
+
+    <!-- Help -->
+    <div class="help-section">
+      <h3>How to use</h3>
+      <ol>
+        <li>Add MIDI files and select your source and destination libraries.</li>
+        <li>Any unmapped articulations will be shown per-file before you convert.</li>
+        <li>Downloaded output includes a folder of individual MIDI files for each unmapped articulation, named with the source library's articulation and note number. Import these into your DAW alongside the main converted file to manually assign them to the articulation of your choice.</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- Drop overlay -->
+  <div id="drop-overlay" class="drop-overlay hidden">
+    <div class="drop-overlay-content">
+      <div class="drop-overlay-icon">&#127929;</div>
+      <div class="drop-overlay-text">Drop MIDI Files</div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+  <script type="module" src="js/mapping.js"></script>
+  <script type="module" src="js/midi-processor.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
