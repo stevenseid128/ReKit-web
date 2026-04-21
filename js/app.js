@@ -2,11 +2,25 @@
 
 import { loadCSV, buildMapping, midiNoteName } from './mapping.js';
 import { processMIDIFile, scanMIDIFileNotes } from './midi-processor.js';
+import {
+  loadPresets,
+  savePresets,
+  deletePreset as removePresetById,
+  presetsForPair,
+  resolvePreset,
+  applyOverlay,
+  exportPresetsJSON,
+  importPresetsJSON,
+  mergeImported,
+} from './presets.js';
+import { openMappingEditor } from './mapping-editor.js';
 
 // State
 let libraries = [];
-let currentMapping = new Map();
+let curatedMapping = new Map();     // source note → dest note (from CSV, unmodified)
+let currentMapping = new Map();     // effective mapping (curated + active preset overlay)
 let currentPersonalRef = new Map();
+let activePreset = null;            // Preset | null — null = "none"/passive default
 let midiFiles = []; // { id, file, name }
 let scanResults = null;      // null = no scan, array = per-file scan results
 let convertedResults = null; // null = not converted, array = per-file results
@@ -26,6 +40,12 @@ const infoMessage = document.getElementById('info-message');
 const dropOverlay = document.getElementById('drop-overlay');
 const downloadSection = document.getElementById('download-section');
 const downloadBtn = document.getElementById('download-btn');
+const presetSelect = document.getElementById('preset-select');
+const presetDeleteBtn = document.getElementById('preset-delete-btn');
+const presetImportBtn = document.getElementById('preset-import-btn');
+const presetExportBtn = document.getElementById('preset-export-btn');
+const presetImportInput = document.getElementById('preset-import-input');
+const openEditorLink = document.getElementById('open-editor-link');
 
 let nextId = 0;
 let lastDownloadBlob = null;
@@ -46,6 +66,8 @@ async function init() {
 
     libraries = result.libraries;
     populateDropdowns();
+    refreshPresetUI();
+    refreshMappingStatus();
     updateConvertBtn();
   } catch (e) {
     showError('Could not load mapping.csv — ensure it is in the assets/ folder.');
@@ -80,15 +102,195 @@ function updateMapping() {
   const srcLib = libraries.find(l => l.name === sourceSelect.value);
   const dstLib = libraries.find(l => l.name === destSelect.value);
 
-  if (!srcLib || !dstLib) return;
+  if (!srcLib || !dstLib) {
+    curatedMapping = new Map();
+    currentMapping = new Map();
+    currentPersonalRef = new Map();
+    // library pair incomplete — clear preset state
+    activePreset = null;
+    refreshPresetUI();
+    refreshMappingStatus();
+    return;
+  }
 
   const result = buildMapping(srcLib, dstLib);
-  currentMapping = result.mapping;
+  curatedMapping = result.mapping;
   currentPersonalRef = result.personalReference;
+
+  // If the active preset doesn't match the new pair, drop it
+  if (activePreset && (activePreset.sourceLibrary !== srcLib.name || activePreset.targetLibrary !== dstLib.name)) {
+    activePreset = null;
+  }
+
+  recomputeEffectiveMapping();
+  refreshPresetUI();
+  refreshMappingStatus();
 
   clearConvertedResults();
   runAutoScan();
   updateConvertBtn();
+}
+
+function recomputeEffectiveMapping() {
+  const srcLib = libraries.find(l => l.name === sourceSelect.value);
+  const dstLib = libraries.find(l => l.name === destSelect.value);
+  if (!srcLib || !dstLib) {
+    currentMapping = new Map(curatedMapping);
+    return;
+  }
+
+  if (!activePreset) {
+    currentMapping = new Map(curatedMapping);
+    return;
+  }
+
+  const { overlay } = resolvePreset(activePreset, srcLib, dstLib);
+  currentMapping = applyOverlay(curatedMapping, overlay);
+}
+
+// ──────────────────────────── Preset UI ────────────────────────────
+
+function refreshPresetUI() {
+  const srcName = sourceSelect.value;
+  const dstName = destSelect.value;
+
+  presetSelect.innerHTML = '';
+  const noneOpt = new Option('None', '');
+  presetSelect.add(noneOpt);
+
+  if (!srcName || !dstName) {
+    presetSelect.disabled = true;
+    presetDeleteBtn.disabled = true;
+    return;
+  }
+
+  presetSelect.disabled = false;
+  const applicable = presetsForPair(loadPresets(), srcName, dstName);
+  for (const p of applicable) {
+    const opt = new Option(p.name || '(unnamed)', p.id);
+    presetSelect.add(opt);
+  }
+  presetSelect.value = activePreset ? activePreset.id : '';
+  presetDeleteBtn.disabled = !activePreset;
+}
+
+function refreshMappingStatus() {
+  // The top-level "Customize mapping →" link is now only a fallback entry
+  // point shown when libraries are selected but no files are loaded.
+  // When files are loaded, per-file Customize buttons take over.
+  const srcName = sourceSelect.value;
+  const dstName = destSelect.value;
+  const canEdit = Boolean(srcName && dstName);
+  const filesPresent = midiFiles.length > 0;
+
+  if (canEdit && !filesPresent) {
+    openEditorLink.classList.remove('hidden');
+  } else {
+    openEditorLink.classList.add('hidden');
+  }
+}
+
+function onPresetSelectChange() {
+  const id = presetSelect.value;
+  if (!id) {
+    activePreset = null;
+  } else {
+    const all = loadPresets();
+    activePreset = all.find(p => p.id === id) || null;
+  }
+  recomputeEffectiveMapping();
+  refreshMappingStatus();
+  presetDeleteBtn.disabled = !activePreset;
+  clearConvertedResults();
+  runAutoScan();
+}
+
+function onPresetDelete() {
+  if (!activePreset) return;
+  const name = activePreset.name || 'this preset';
+  if (!confirm(`Delete preset "${name}"?`)) return;
+  const remaining = removePresetById(loadPresets(), activePreset.id);
+  savePresets(remaining);
+  activePreset = null;
+  recomputeEffectiveMapping();
+  refreshPresetUI();
+  refreshMappingStatus();
+  clearConvertedResults();
+  runAutoScan();
+}
+
+function onPresetExport() {
+  const all = loadPresets();
+  if (all.length === 0) {
+    showError('No presets to export.');
+    return;
+  }
+  const json = exportPresetsJSON(all);
+  const blob = new Blob([json], { type: 'application/json' });
+  saveAs(blob, 'rekit-presets.json');
+}
+
+function onPresetImportClick() {
+  presetImportInput.click();
+}
+
+function onPresetImportFile() {
+  const file = presetImportInput.files && presetImportInput.files[0];
+  presetImportInput.value = '';
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const { presets: incoming, error } = importPresetsJSON(String(reader.result || ''));
+    if (error) {
+      showError(`Preset import failed: ${error}`);
+      return;
+    }
+    const merged = mergeImported(loadPresets(), incoming);
+    savePresets(merged);
+    refreshPresetUI();
+    showInfo(`Imported ${incoming.length} preset${incoming.length === 1 ? '' : 's'}.`);
+  };
+  reader.onerror = () => showError('Could not read preset file.');
+  reader.readAsText(file);
+}
+
+function onOpenEditor(e) {
+  e.preventDefault();
+  const srcLib = libraries.find(l => l.name === sourceSelect.value);
+  const dstLib = libraries.find(l => l.name === destSelect.value);
+  if (!srcLib || !dstLib) return;
+
+  // Collect the set of unmapped notes actually present in loaded files. If no
+  // files are loaded, pass null so the editor falls back to library-wide.
+  let fileScopedUnmappedNotes = null;
+  if (scanResults && midiFiles.length > 0) {
+    fileScopedUnmappedNotes = new Set();
+    for (const r of scanResults) {
+      if (!r || r.error) continue;
+      for (const u of r.unmapped) {
+        if (!currentMapping.has(u.note)) fileScopedUnmappedNotes.add(u.note);
+      }
+    }
+  }
+
+  openMappingEditor({
+    srcLib,
+    dstLib,
+    curated: curatedMapping,
+    personalReference: currentPersonalRef,
+    fileScopedUnmappedNotes,
+    initialPreset: activePreset,
+    onApply: (preset) => {
+      // Reflect in-editor edits live on the main screen
+      activePreset = preset;
+      recomputeEffectiveMapping();
+      refreshPresetUI();
+      refreshMappingStatus();
+      clearConvertedResults();
+      runAutoScan();
+    },
+    onClose: () => {}
+  });
 }
 
 // ──────────────────────────── Auto-Scan ────────────────────────────
@@ -96,6 +298,7 @@ function updateMapping() {
 function runAutoScan() {
   if (!sourceSelect.value || !destSelect.value || midiFiles.length === 0) {
     scanResults = null;
+    refreshMappingStatus();
     return;
   }
 
@@ -125,6 +328,7 @@ function runAutoScan() {
   Promise.all(promises).then(results => {
     scanResults = results;
     renderFileList();
+    refreshMappingStatus();
   });
 }
 
@@ -186,25 +390,31 @@ function renderFileList() {
 }
 
 function renderSimpleFileList() {
+  const canCustomize = Boolean(sourceSelect.value && destSelect.value);
   fileList.innerHTML = midiFiles.map(f =>
     `<div class="file-row" data-id="${f.id}">
       <span class="file-name">${escapeHtml(f.name)}</span>
+      ${canCustomize ? '<button class="file-customize-btn" title="Customize mapping">Customize</button>' : ''}
       <button class="remove-btn" title="Remove">&times;</button>
     </div>`
   ).join('');
 
   attachRemoveListeners();
+  attachCustomizeListeners();
 }
 
 function renderAnnotatedFileList() {
   // Prefer convertedResults over scanResults for each file
   const activeResults = convertedResults || scanResults;
+  const canCustomize = Boolean(sourceSelect.value && destSelect.value);
+  const customizeBtn = canCustomize ? '<button class="file-customize-btn" title="Customize mapping">Customize</button>' : '';
 
   fileList.innerHTML = midiFiles.map(f => {
     const result = activeResults ? activeResults.find(r => r.id === f.id) : null;
     if (!result) {
       return `<div class="file-row" data-id="${f.id}">
         <span class="file-name">${escapeHtml(f.name)}</span>
+        ${customizeBtn}
         <button class="remove-btn" title="Remove">&times;</button>
       </div>`;
     }
@@ -213,6 +423,7 @@ function renderAnnotatedFileList() {
       return `<div class="file-row file-row-error" data-id="${f.id}">
         <span class="file-name">${escapeHtml(f.name)}</span>
         <span class="file-error">${escapeHtml(result.error)}</span>
+        ${customizeBtn}
         <button class="remove-btn" title="Remove">&times;</button>
       </div>`;
     }
@@ -243,6 +454,7 @@ function renderAnnotatedFileList() {
         <span class="toggle-arrow">${hasUnmapped ? '\u25BC' : ''}</span>
         <span class="file-name">${escapeHtml(f.name)}</span>
         ${badge}
+        ${customizeBtn}
         <button class="remove-btn" title="Remove">&times;</button>
       </div>
       ${unmappedRows}
@@ -252,7 +464,7 @@ function renderAnnotatedFileList() {
   // Attach toggle listeners
   fileList.querySelectorAll('.file-row-converted').forEach(row => {
     row.addEventListener('click', (e) => {
-      if (e.target.closest('.remove-btn')) return;
+      if (e.target.closest('.remove-btn') || e.target.closest('.file-customize-btn')) return;
       const wrap = row.closest('.file-row-wrap');
       if (!wrap || !wrap.querySelector('.unmapped-details')) return;
       wrap.classList.toggle('expanded');
@@ -262,14 +474,30 @@ function renderAnnotatedFileList() {
   });
 
   attachRemoveListeners();
+  attachCustomizeListeners();
 }
 
 function attachRemoveListeners() {
   fileList.querySelectorAll('.remove-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
-      const row = e.target.closest('.file-row, .file-row-wrap');
-      const id = parseInt(row.dataset.id, 10);
-      removeFile(id);
+      e.stopPropagation();
+      // Walk up until we find an element carrying data-id. The annotated
+      // layout has data-id on the outer .file-row-wrap, but closest() would
+      // otherwise stop at the inner .file-row which has no data-id.
+      let el = e.target;
+      while (el && !(el.dataset && el.dataset.id)) el = el.parentElement;
+      if (!el) return;
+      const id = parseInt(el.dataset.id, 10);
+      if (!Number.isNaN(id)) removeFile(id);
+    });
+  });
+}
+
+function attachCustomizeListeners() {
+  fileList.querySelectorAll('.file-customize-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onOpenEditor(e);
     });
   });
 }
@@ -402,6 +630,12 @@ document.addEventListener('drop', (e) => {
 
 sourceSelect.addEventListener('change', updateMapping);
 destSelect.addEventListener('change', updateMapping);
+presetSelect.addEventListener('change', onPresetSelectChange);
+presetDeleteBtn.addEventListener('click', onPresetDelete);
+presetExportBtn.addEventListener('click', onPresetExport);
+presetImportBtn.addEventListener('click', onPresetImportClick);
+presetImportInput.addEventListener('change', onPresetImportFile);
+openEditorLink.addEventListener('click', onOpenEditor);
 fileInput.addEventListener('change', () => {
   addFiles(fileInput.files);
   fileInput.value = '';
